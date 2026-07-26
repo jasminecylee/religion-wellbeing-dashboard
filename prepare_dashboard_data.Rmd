@@ -51,3 +51,117 @@ w_se <- function(x, w) {
   sqrt(v / n_eff)
 }
 ```
+
+# 1. CATEGORISE MAJORITY/MINORITY STATUS 
+
+Individuals will be classified as belonging to majority or minority
+religious groups according to the World Values Survey overall sample.
+
+## Clean outcomes & weights
+
+```{r clean-outcomes}
+data <- data %>%
+  mutate(
+    life_satisfaction = if_else(life_satisfaction < 0, NA_real_, as.numeric(life_satisfaction)),
+    happiness         = as.numeric(happiness),
+    health            = as.numeric(health),
+    survey_weight     = if_else(is.na(survey_weight) | survey_weight <= 0, 1, survey_weight)
+  )
+
+# Keep only respondents with a religious affiliation reported
+data <- data %>% filter(!is.na(religion_wrd))
+
+data %>% nrow()
+```
+
+## Country religious composition (according to WVS sample)
+
+```{r wvs-composition}
+wvs_composition <- data %>%
+  group_by(country) %>%
+  mutate(country_w = sum(survey_weight)) %>%
+  group_by(country, religion_wrd) %>%
+  summarise(
+    n         = n(),
+    n_w       = sum(survey_weight),
+    country_w = first(country_w),
+    .groups   = "drop"
+  ) %>%
+  mutate(share = 100 * n_w / country_w) %>%
+  arrange(country, desc(share))
+
+wvs_composition %>% slice_head(n = 10)
+```
+
+## Identify the majority group
+
+Majority definition: the religious group holding **more than 50%** of
+the weighted WVS sample in that country. Countries with no such group
+are dropped.
+
+```{r identify-majority}
+country_majority <- wvs_composition %>%
+  group_by(country) %>%
+  slice_max(share, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(
+    country,
+    majority_religion = religion_wrd,
+    majority_share    = share,
+    has_majority      = share > 50
+  )
+
+# Countries with no majority group in the WVS sample
+country_majority %>% filter(!has_majority) %>% arrange(desc(majority_share))
+
+country_majority <- country_majority %>% filter(has_majority)
+
+data <- data %>%
+  inner_join(country_majority %>% dplyr::select(country, majority_religion),
+             by = "country")
+
+data$country %>% n_distinct()
+```
+
+## Categorise individuals
+
+```{r categorise-individuals}
+data <- data %>%
+  mutate(
+    religion_status = if_else(religion_wrd == majority_religion, "Majority", "Minority"),
+    religion_status = factor(religion_status, levels = c("Majority", "Minority"))
+  )
+
+data %>% count(religion_status)
+```
+
+## Drop countries with very small minority samples
+
+Countries where the minority makes up less than 1% of the sample are
+dropped — the comparison would not be meaningful.
+
+```{r drop-small-minorities}
+country_check <- data %>%
+  group_by(country) %>%
+  summarise(
+    n_total     = n(),
+    n_majority  = sum(religion_status == "Majority"),
+    n_minority  = sum(religion_status == "Minority"),
+    pct_minority = 100 * n_minority / n_total,
+    .groups = "drop"
+  ) %>%
+  arrange(pct_minority)
+
+country_check %>% print(n = Inf)
+
+countries_drop <- country_check %>%
+  filter(pct_minority < 1 | n_minority < 30) %>%
+  pull(country)
+
+countries_drop
+
+data <- data %>% filter(!country %in% countries_drop)
+
+data$country %>% n_distinct()
+data %>% nrow()
+```
