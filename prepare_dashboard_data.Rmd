@@ -52,7 +52,7 @@ w_se <- function(x, w) {
 }
 ```
 
-# 1. CATEGORISE MAJORITY/MINORITY STATUS 
+# 1. CATEGORISE MAJORITY/MINORITY STATUS
 
 Individuals will be classified as belonging to majority or minority
 religious groups according to the World Values Survey overall sample.
@@ -91,6 +91,16 @@ wvs_composition <- data %>%
   arrange(country, desc(share))
 
 wvs_composition %>% slice_head(n = 10)
+
+tidy_religion <- function(x) {
+  x %>%
+    gsub("_", " ", .) %>%
+    gsub("No denomination", "No religious denomination", .) %>%
+    gsub("^Jew$", "Jewish", .) %>%
+    gsub("Ethnic religionist", "Ethnic religions", .) %>%
+    gsub("Chinese folk religionist", "Chinese folk religions", .) %>%
+    gsub("Other religion$", "Other", .)
+}
 ```
 
 ## Identify the majority group
@@ -190,6 +200,9 @@ tbl_composition <- wvs_composition %>%
   arrange(country, desc(share))
 
 tbl_composition %>% slice_head(n = 10)
+
+tbl_composition <- tbl_composition %>% mutate(religion = tidy_religion(religion))
+tbl_gaps <- tbl_gaps %>% mutate(majority_religion = tidy_religion(majority_religion))
 ```
 
 ## Table 2: Outcome means by country and religious minority/majority status (means)

@@ -28,9 +28,9 @@ PAL <- list(
 )
 
 outcome_choices <- c(
-  "Life satisfaction (1-10)" = "life_satisfaction",
-  "Happiness (1-4)"          = "happiness",
-  "Self-rated health (1-5)"  = "health"
+  "Life satisfaction (1-10 scale)" = "life_satisfaction",
+  "Happiness (1-4 scale)"          = "happiness",
+  "Self-rated health (1-5 scale)"  = "health"
 )
 
 countries <- sort(unique(dash$gaps$country))
@@ -38,7 +38,7 @@ countries <- sort(unique(dash$gaps$country))
 # ---- UI ----------------------------------------------------------------------
 
 ui <- page_navbar(
-  title = "Wellbeing of religious minorities and majorities across countries in the World Values Survey (2017-2022)",
+  title = "Health and wellbeing of religious minorities and majorities across countries",
   theme = bs_theme(
     version = 5,
     bg = "#FFFFFF", fg = "#1B1F24",
@@ -51,6 +51,11 @@ ui <- page_navbar(
   # -- Tab 1: cross-country overview -------------------------------------------
   nav_panel(
     "Cross-country overview",
+    div(
+      class = "pt-3 pb-2 text-muted",
+      style = "max-width: 900px; font-size: 0.9rem;",
+      "Life satisfaction, happiness, and general health among adults from religious minority and majority groups across countries in the World Values Survey (2017-2022)."
+    ),
     layout_sidebar(
       sidebar = sidebar(
         width = 300,
@@ -62,10 +67,10 @@ ui <- page_navbar(
                                  "Alphabetical" = "alpha"),
                      selected = "gap"),
         sliderInput("top_n", "Number of countries shown",
-                    min = 10, max = length(countries),
-                    value = min(25, length(countries)), step = 5),
-        helpText("Countries are ranked by the size of the minority-majority",
-                 "difference. Reduce the number shown for a more readable chart."),
+                    min = 5, max = length(countries),
+                    value = length(countries), step = 1),
+        helpText("All countries are shown by default. Reducing the number shows a less cluttered visualisation",
+                 "but keeps countries with larger minority-majority gaps."),
         hr(),
         downloadButton("download_gaps", "Download country gaps (CSV)",
                        class = "btn-sm btn-outline-secondary")
@@ -75,7 +80,7 @@ ui <- page_navbar(
         fill = FALSE,
         value_box("Countries", textOutput("vb_countries"), theme = "primary"),
         value_box("Respondents", textOutput("vb_n"), theme = "secondary"),
-        value_box("Median gap", textOutput("vb_gap"), theme = "light")
+        value_box("Median country gap", textOutput("vb_gap"), theme = "light")
       ),
       
       card(
@@ -133,9 +138,14 @@ ui <- page_navbar(
         ),
         card(
           card_header("Wellbeing by religious status"),
-          plotlyOutput("country_means", height = "380px")
+          plotlyOutput("country_means", height = "460px"),
+          card_footer(
+            class = "text-muted small",
+            "Horizontal bars show 95% confidence intervals.",
+            "Where the two intervals overlap, the difference between groups is imprecise."
+          )
         )
-      ),
+        ),
       
       card(
         card_header("Group averages and differences"),
@@ -150,52 +160,61 @@ ui <- page_navbar(
     div(
       class = "container-sm py-3",
       style = "max-width: 820px;",
-      h4("What this dashboard shows"),
-      p("Weighted descriptive averages of three wellbeing measures for religious",
-        "majority and minority respondents in each country, using the World Values",
-        "Survey (Wave 7, 2017-2022). It is an exploratory tool: everything shown is",
-        "a group mean or a raw difference between two group means."),
       
-      h4("How majority and minority are defined"),
-      p("Religious composition is estimated from the survey itself. Within each",
-        "country, the weighted share of respondents in each religious group is",
-        "calculated, and the group holding more than 50% of the sample is treated",
-        "as the religious majority. All other respondents are classified as",
-        "religious minorities. Countries with no group above 50%, and countries",
-        "where minorities make up less than 1% of the sample, are excluded."),
+      markdown("
+#### What this dashboard shows
+
+Weighted descriptive averages of **three health and wellbeing measures for religious
+majority and minority respondents in each country, using the World Values Survey
+(Wave 7, 2017-2022)**. It is an *exploratory* tool: everything shown is a group mean
+or a raw difference between two group means.
+
+#### How majority and minority are defined
+
+Religious composition is estimated from the survey itself. Within each country,
+the weighted share of respondents in each religious group is calculated, and the
+group holding **more than 50%** of the sample is treated as the religious majority.
+All other respondents are classified as religious minorities.
+
+Countries with no group above 50%, and countries where minorities make up less
+than 1% of the sample, are excluded.
+
+#### Weighting
+
+All means use the survey's sampling weights. Standard errors use Kish's effective
+sample size so that they reflect the weighting rather than the raw number of rows.
+
+#### Caveats
+
+- Differences are descriptive and are not adjusted for age, sex, or any other
+  characteristic. **No causal conclusions can be drawn.**
+- Religious minorities are more likely to not respond to the happiness item, so
+  observed differences are likely conservative.
+- Defining majority status from sample shares rather than national religious
+  demography means the country set here differs from studies using external
+  demographic sources.
+- Minority groups are pooled together within each country and are not directly
+  comparable across countries.
+
+#### Item non-response by group
+      "),
       
-      h4("Weighting"),
-      p("All means use the survey's sampling weights. Standard errors use Kish's",
-        "effective sample size so that they reflect the weighting rather than the",
-        "raw number of rows."),
+      tableOutput("missing_table"),
       
-      h4("Caveats"),
-      tags$ul(
-        tags$li("Differences are descriptive and are not adjusted for age, sex, or",
-                "any other characteristic. They should not be read causally."),
-        tags$li("Religious minorities are more likely to leave the wellbeing items",
-                "blank, so observed differences are likely conservative."),
-        tags$li("Defining majority status from sample shares rather than national",
-                "religious demography means the country set here differs from",
-                "studies using external demographic sources."),
-        tags$li("Minority groups are pooled together within each country and are",
-                "not directly comparable across countries.")
-      ),
+      markdown("
       
-      h4("Item non-response by group"),
-      DTOutput("missing_table"),
-      
-      h4("Source and code", class = "mt-4"),
-      p("Data: World Values Survey Wave 7 (2017-2022), available from",
-        a("worldvaluessurvey.org", href = "https://www.worldvaluessurvey.org",
-          target = "_blank"), ".",
-        "Microdata are not redistributed here; this app reads pre-aggregated",
-        "country-level tables produced by the preparation script in the",
-        "repository.")
+#### Source and code
+
+Data: World Values Survey Wave 7 (2017-2022), available from
+[worldvaluessurvey.org](https://www.worldvaluessurvey.org).
+
+Microdata are not redistributed here; this app reads pre-aggregated country-level
+tables produced by the preparation script in the
+[repository](https://github.com/YOUR-USERNAME/YOUR-REPO).
+      ")
     )
   )
 )
-
 
 # ---- Server ------------------------------------------------------------------
 
@@ -208,19 +227,14 @@ server <- function(input, output, session) {
   })
   
   gaps_ranked <- reactive({
-    df <- gaps_out()
-    df <- df %>% slice_min(gap, n = input$top_n, with_ties = FALSE)
+    df <- gaps_out() %>% slice_min(gap, n = input$top_n, with_ties = FALSE)
     df <- switch(
       input$sort_by,
       gap      = df %>% arrange(desc(gap)),
       majority = df %>% arrange(mean_Majority),
       alpha    = df %>% arrange(desc(country))
     )
-    # Keep the countries with the largest absolute gaps when filtering
-    keep <- df %>% slice_max(abs(gap), n = input$top_n, with_ties = FALSE) %>% pull(country)
-    df %>%
-      filter(country %in% keep) %>%
-      mutate(country = factor(country, levels = country))
+    df %>% mutate(country = factor(country, levels = country))
   })
   
   means_ranked <- reactive({
@@ -284,7 +298,7 @@ server <- function(input, output, session) {
   # Height scales with the number of countries so rows never crowd together.
   
   output$dumbbell_ui <- renderUI({
-    plotlyOutput("dumbbell", height = paste0(max(320, 22 * input$top_n + 90), "px"))
+    plotlyOutput("dumbbell", height = paste0(max(320, 19 * input$top_n + 90), "px"))
   })
   
   output$dumbbell <- renderPlotly({
@@ -405,36 +419,46 @@ server <- function(input, output, session) {
   output$country_means <- renderPlotly({
     df <- dash$means %>%
       filter(country == input$country) %>%
-      mutate(measure = factor(
-        outcome,
-        levels = c("life_satisfaction", "happiness", "health"),
-        labels = c("Life satisfaction (1-10)", "Happiness (1-4)", "Self-rated health (1-5)")
-      ))
+      mutate(
+        measure = factor(
+          outcome,
+          levels = c("life_satisfaction", "happiness", "health"),
+          labels = c("Life satisfaction (1-10)", "Happiness (1-4)", "Self-rated health (1-5)")
+        ),
+        religion_status = factor(religion_status, levels = c("Minority", "Majority"))
+      )
     
-    p <- ggplot(df, aes(x = mean, y = "", colour = religion_status)) +
-      geom_line(aes(group = measure), colour = PAL$link, linewidth = 1.8, lineend = "round") +
-      geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.12, alpha = 0.45) +
-      geom_point(aes(text = paste0(religion_status, ": ", sprintf("%.2f", mean),
-                                   "<br>95% CI ", sprintf("%.2f", lower), " to ",
-                                   sprintf("%.2f", upper),
-                                   "<br>n = ", format(n, big.mark = ","))),
-                 size = 3.4) +
+    links <- df %>%
+      select(measure, religion_status, mean) %>%
+      pivot_wider(names_from = religion_status, values_from = mean)
+    
+    p <- ggplot(df, aes(x = mean, y = religion_status, colour = religion_status)) +
+      geom_segment(
+        data = links, inherit.aes = FALSE,
+        aes(x = Majority, xend = Minority, y = "Majority", yend = "Minority"),
+        colour = PAL$link, linewidth = 1.4, lineend = "round"
+      ) +
+      geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.16, alpha = 0.55) +
+      geom_point(
+        aes(text = paste0("<b>", religion_status, "</b><br>",
+                          "Mean: ", sprintf("%.2f", mean),
+                          "<br>95% CI ", sprintf("%.2f", lower), " to ", sprintf("%.2f", upper),
+                          "<br>n = ", format(n, big.mark = ","))),
+        size = 3.6
+      ) +
       facet_wrap(~ measure, ncol = 1, scales = "free_x") +
-      scale_colour_manual(values = c(Majority = PAL$majority, Minority = PAL$minority),
-                          name = NULL) +
+      scale_colour_manual(values = c(Majority = PAL$majority, Minority = PAL$minority)) +
       labs(x = NULL, y = NULL) +
       theme_minimal(base_size = 12) +
-      theme(panel.grid.major.y = element_blank(),
-            panel.grid.minor   = element_blank(),
-            strip.text         = element_text(hjust = 0, face = "bold", size = 10),
-            legend.position    = "top")
+      theme(
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor   = element_blank(),
+        strip.text         = element_text(hjust = 0, face = "bold", size = 10),
+        legend.position    = "none"
+      )
     
     ggplotly(p, tooltip = "text") %>%
-      layout(
-        legend = list(orientation = "h", x = 0, y = 1.14,
-                      xanchor = "left", yanchor = "bottom"),
-        margin = list(t = 60)
-      ) %>%
+      layout(margin = list(t = 30)) %>%
       config(displayModeBar = FALSE)
   })
   
@@ -464,6 +488,17 @@ server <- function(input, output, session) {
         )
       )
   })
+  
+  output$missing_table <- renderTable({
+    dash$missingness %>%
+      transmute(
+        Group = as.character(religion_status),
+        n = format(n, big.mark = ","),
+        `Life satisfaction missing (%)` = pct_missing_ls,
+        `Happiness missing (%)`         = pct_missing_happy,
+        `Health missing (%)`            = pct_missing_health
+      )
+  }, striped = TRUE, hover = TRUE, digits = 1)
 }
 
 shinyApp(ui, server)
