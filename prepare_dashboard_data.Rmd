@@ -165,3 +165,141 @@ data <- data %>% filter(!country %in% countries_drop)
 data$country %>% n_distinct()
 data %>% nrow()
 ```
+
+# 2. BUILD DASHBOARD TABLES
+
+## Country lookup
+
+```{r country-lookup}
+country_lookup <- data %>%
+  distinct(country) %>%
+  mutate(iso3c = countrycode(country, origin = "country.name", destination = "iso3c"))
+
+# Check nothing failed to match
+country_lookup %>% filter(is.na(iso3c))
+```
+
+## Table 1: Religious composition by country
+
+```{r table-composition}
+tbl_composition <- wvs_composition %>%
+  semi_join(country_lookup, by = "country") %>%
+  left_join(country_majority %>% dplyr::select(country, majority_religion), by = "country") %>%
+  mutate(status = if_else(religion_wrd == majority_religion, "Majority", "Minority")) %>%
+  transmute(country, religion = religion_wrd, n, share, status) %>%
+  arrange(country, desc(share))
+
+tbl_composition %>% slice_head(n = 10)
+```
+
+## Table 2: Outcome means by country and religious minority/majority status (means)
+
+```{r table-means}
+outcome_labels <- c(
+  life_satisfaction = "Life satisfaction (1–10)",
+  happiness         = "Happiness (1–4)",
+  health            = "Self-rated health (1–5)"
+)
+
+tbl_means <- data %>%
+  dplyr::select(country, religion_status, survey_weight,
+                life_satisfaction, happiness, health) %>%
+  pivot_longer(c(life_satisfaction, happiness, health),
+               names_to = "outcome", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  group_by(country, outcome, religion_status) %>%
+  summarise(
+    n    = n(),
+    mean = w_mean(value, survey_weight),
+    se   = w_se(value, survey_weight),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    lower = mean - 1.96 * se,
+    upper = mean + 1.96 * se,
+    outcome_label = outcome_labels[outcome]
+  )
+
+tbl_means %>% slice_head(n = 6)
+```
+
+## Table 3: Minority–majority gaps
+
+Negative values indicate that religious minorities score lower than the
+majority in that country.
+
+```{r table-gaps}
+tbl_gaps <- tbl_means %>%
+  dplyr::select(country, outcome, outcome_label, religion_status, mean, se, n) %>%
+  pivot_wider(
+    names_from  = religion_status,
+    values_from = c(mean, se, n)
+  ) %>%
+  mutate(
+    gap    = mean_Minority - mean_Majority,
+    gap_se = sqrt(se_Minority^2 + se_Majority^2),
+    gap_lower = gap - 1.96 * gap_se,
+    gap_upper = gap + 1.96 * gap_se
+  ) %>%
+  left_join(country_lookup, by = "country") %>%
+  left_join(
+    country_majority %>% dplyr::select(country, majority_religion, majority_share),
+    by = "country"
+  ) %>%
+  left_join(
+    country_check %>% dplyr::select(country, n_total, pct_minority),
+    by = "country"
+  )
+
+tbl_gaps %>%
+  filter(outcome == "life_satisfaction") %>%
+  arrange(gap) %>%
+  dplyr::select(country, majority_religion, gap, gap_lower, gap_upper) %>%
+  print(n = Inf)
+```
+
+## Table 4: Missingness by status
+
+Important note: minorities are less likely to report happiness outcomes
+which means that the descriptive gaps are likely conservative.
+
+```{r table-missingness}
+tbl_missing <- data %>%
+  group_by(religion_status) %>%
+  summarise(
+    n = n(),
+    pct_missing_ls     = round(100 * mean(is.na(life_satisfaction)), 1),
+    pct_missing_happy  = round(100 * mean(is.na(happiness)), 1),
+    pct_missing_health = round(100 * mean(is.na(health)), 1),
+    .groups = "drop"
+  )
+
+tbl_missing
+```
+
+# 3. SAVE AGGREGATED DATA FOR THE DASHBOARD
+
+```{r save-dashboard-data}
+dashboard_data <- list(
+  composition = tbl_composition,
+  means       = tbl_means,
+  gaps        = tbl_gaps,
+  missingness = tbl_missing,
+  lookup      = country_lookup,
+  meta = list(
+    n_countries   = n_distinct(data$country),
+    n_respondents = nrow(data),
+    n_majority    = sum(data$religion_status == "Majority"),
+    n_minority    = sum(data$religion_status == "Minority"),
+    built_on      = Sys.Date()
+  )
+)
+
+dir.create("data", showWarnings = FALSE)
+saveRDS(dashboard_data, "data/dashboard_data.rds")
+
+# Also export a plain CSV of the country-level gaps for download in the app
+write_csv(dashboard_data$gaps, "data/country_gaps.csv")
+
+dashboard_data$meta
+```
