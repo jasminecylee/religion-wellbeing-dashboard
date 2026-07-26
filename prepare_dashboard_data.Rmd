@@ -1,0 +1,53 @@
+---
+title: "Prepare dashboard data"
+author: "Jasmine Lee"
+date: "2026-07-26"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+# 0. OVERVIEW & SETUP
+
+### **Setup**
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(tidyverse, countrycode)
+
+# Read in cleaned dataset (not committed to the repository)
+data <- readRDS("data.rds")
+
+data %>% nrow()
+data %>% dplyr::select(country, religion_wrd, life_satisfaction, happiness,
+                       health, age, sex, survey_weight) %>% glimpse()
+```
+
+Helper functions
+
+```{r helper-functions}
+w_mean <- function(x, w) {
+  keep <- !is.na(x) & !is.na(w) & w > 0
+  if (sum(keep) == 0) return(NA_real_)
+  sum(x[keep] * w[keep]) / sum(w[keep])
+}
+
+w_se <- function(x, w) {
+  keep <- !is.na(x) & !is.na(w) & w > 0
+  if (sum(keep) < 2) return(NA_real_)
+  x <- x[keep]; w <- w[keep]
+  n_eff <- sum(w)^2 / sum(w^2)          # Kish effective sample size
+  m     <- sum(w * x) / sum(w)
+  v     <- sum(w * (x - m)^2) / sum(w)  # weighted variance
+  sqrt(v / n_eff)
+}
+```

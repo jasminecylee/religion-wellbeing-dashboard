@@ -1,0 +1,7 @@
+data.rds
+*.sav
+*.dta
+.Rhistory
+.RData
+.Rproj.user/
+rsconnect/
