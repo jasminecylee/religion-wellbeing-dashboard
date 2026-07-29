@@ -210,8 +210,17 @@ Data: World Values Survey Wave 7 (2017-2022), available from
 
 Microdata are not redistributed here; this app reads pre-aggregated country-level
 tables produced by the preparation script in the
-[repository](https://github.com/YOUR-USERNAME/YOUR-REPO).
+[repository](https://github.com/jasminecylee/religion-wellbeing-dashboard).
       ")
+    )
+  ),
+  
+  nav_spacer(),
+  nav_item(
+    tags$a(
+      "View code on GitHub",
+      href = "https://github.com/YOUR-USERNAME/YOUR-REPO",
+      target = "_blank"
     )
   )
 )
