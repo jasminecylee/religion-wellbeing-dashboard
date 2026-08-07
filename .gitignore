@@ -5,3 +5,4 @@ data.rds
 .RData
 .Rproj.user/
 rsconnect/
+.DS_Store
