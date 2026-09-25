@@ -2,7 +2,7 @@
 
 An interactive dashboard of descriptive differences in wellbeing and health between religious majority and minority groups, using the World Values Survey (Wave 7, 2017–2022).
 
-*Live app**: <https://jasminecylee.shinyapps.io/religious-min-maj-health-wellbeing/>
+#**Live app**: <https://jasminecylee.shinyapps.io/religious-min-maj-health-wellbeing/>
 
 ### What it does
 
