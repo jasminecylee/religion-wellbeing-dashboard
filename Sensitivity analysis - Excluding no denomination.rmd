@@ -1,0 +1,942 @@
+---
+title: "Sensitivity Analysis - Meta-regressions"
+author: "Jasmine Lee"
+date: "2026-03-09"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+---
+
+################################################################################ 
+
+# 0. OVERVIEW & SETUP
+
+################################################################################ 
+
+This script presents sensitivity moderation analyses - two-stage meta-regressions, to complement multilevel models with interactions in the main analyses.
+
+For main analyses, see 'Main analyses.Rmd'.
+
+For other sensitivity analyses, see
+
+- 'Sensitivity analysis - Excluding no denomination.Rmd' for repeat of all analyses excluding no denomination group
+
+- 'Sensitivity analysis - Largest group.Rmd' for repeat of all analyses with the largest group as majority (rather than \>50%)
+
+**Setup**
+
+Load functions, file paths, and packages
+
+We load in the file from the main analysis which has already a) removed countries with no majority (in demographics or WVS sample), b) removed countries with minorities \<1%, c) removed individuals with missing on exposure/covariates/all 3 outcomes.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# Set cran repo
+options(repos = c(
+  CRAN      = "https://cloud.r-project.org",
+  CRANextra = "https://cloud.r-project.org"
+))
+
+
+# Load packages (and update if necessary)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  # Data wrangling
+  tidyverse, dplyr, broom,
+  # Models
+  lme4, lmerTest, emmeans, metafor,
+  # Visualisations
+  visdat, ggplot2, flextable, officer, sf, countrycode, rnaturalearth, grid, scales, forestploter, ggrepel, patchwork
+)
+
+# Read in cleaned & analysed dataset from main analyses
+data <- readRDS("data_main_analyses.rds")
+
+# Check data
+data %>% colnames()
+data %>% nrow() # n = 79,152 - correct
+```
+
+################################################################################ 
+
+# 1. REMOVE NO DENOMINATION GROUP FOR SENSITIVITY
+
+################################################################################ 
+
+In the main analyses all religious groups were included. However, one can argue that individuals with no denomination function differently as a religious group, for example, a no denomination minority is substantially qualitatively different from a Muslim minority in a Christian-dominant country.
+
+In our first set of sensitivity analyses, we exclude the denomination group and re-run all analyses. Only those affiliated to a religion will be included.
+
+```{r}
+# Create no denomination excluded dataset ---- 
+
+data_exc <- data %>% filter(religion_wrd != "No_Denomination")
+
+# Check
+data_exc %>% count(religion_wrd) # Double check 
+data_exc %>% count(religion_status) # Majority: 55,523, Minority: 7,437
+data_exc %>% distinct(country) %>% nrow() # 54 countries
+```
+
+```{r}
+# Create factor
+data_exc$country <- factor(data_exc$country)
+data_exc$religion_status <- factor(data_exc$religion_status)
+data_exc$religion_status %>% levels()
+```
+
+```{r}
+# Remove countries with a minority <1%
+country_check <- data_exc %>%
+  group_by(country) %>%
+  summarise(
+    n_total = n(),
+    n_majority = sum(religion_status == "Majority", na.rm = TRUE),
+    n_minority = sum(religion_status == "Minority", na.rm = TRUE),
+    pct_majority = 100 * n_majority / n_total,
+    pct_minority = 100 * n_minority / n_total,
+    n_groups = n_distinct(religion_status),
+    .groups = "drop"
+  ) %>%
+  arrange(pct_minority)
+country_check %>% print(n=57)
+# 3 countries have minority <1%. Czechia has no majority.
+
+# Drop these countries
+countries_drop <- country_check %>%
+  filter(pct_minority < 1 | n_groups == 1) %>%
+  pull(country)
+
+data_exc <- data_exc %>%
+  filter(!country %in% countries_drop)
+
+# Check remaining countries
+data_exc$country %>% unique() 
+data_exc %>% count
+# 39 countries left
+```
+
+```{r}
+## ---- Save data_exc ----
+# Save in R
+saveRDS(data_exc, "data_exc.rds")
+
+
+## ---- Create demographic table ----
+
+# Define function 
+make_table <- function(df, country_sample_sizes) {
+  
+  country_religion_composition <- df %>%
+    filter(!is.na(religion_status)) %>%
+    group_by(country) %>%
+    mutate(country_n = n()) %>%
+    group_by(country, religion_wrd, religion_status) %>%
+    summarise(
+      n = n(),
+      country_n = first(country_n),
+      .groups = "drop_last"
+    ) %>%
+    mutate(pct_of_country = n / country_n * 100) %>%
+    ungroup()
+  
+  majority_table <- country_religion_composition %>%
+    filter(religion_status == "Majority") %>%
+    select(
+      country,
+      majority_religion = religion_wrd,
+      majority_pct = pct_of_country
+    )
+  
+  minority_summary <- country_religion_composition %>%
+    filter(religion_status == "Minority") %>%
+    arrange(country, desc(pct_of_country)) %>%
+    group_by(country) %>%
+    summarise(
+      minority_composition = paste0(
+        religion_wrd, " (", round(pct_of_country, 1), "%)",
+        collapse = "; "
+      ),
+      minority_pct_total = round(sum(pct_of_country), 1),
+      .groups = "drop"
+    )
+  
+  table <- country_sample_sizes %>%
+    left_join(majority_table, by = "country") %>%
+    left_join(minority_summary, by = "country")
+
+  return(table)
+}
+
+country_sample_sizes <- data_exc %>%
+  group_by(country) %>%
+  summarise(sample_size = n()) %>% 
+  arrange(country)
+country_sample_sizes %>% print(n=52) 
+
+# Create table 
+table <- make_table(
+  df = data_exc, 
+  country_sample_sizes = country_sample_sizes
+)
+
+# Save to word
+ft <- flextable(table) %>%
+  set_header_labels(
+    country = "Country",
+    majority_religion = "Majority religion (country demographics)",
+    majority_pct = "Majority religion % of sample",
+    minority_composition = "Minority religion composition (% of sample)",
+    minority_pct_total = "Minority religions total %"
+  ) %>%
+  colformat_num(
+    j = c("majority_pct", "minority_pct_total"),
+    digits = 1
+  ) %>%
+  bold(part = "header") %>%
+  theme_booktabs() %>%
+  fontsize(size = 10, part = "all") %>%
+  align(align = "center", part ="all") %>% 
+  align(j = 1, align = "left", part = "all") %>%
+  set_table_properties(
+    layout ="fixed",
+    width = 1
+  ) %>% 
+  fit_to_width(max_width = 11)
+
+doc <- read_docx() 
+doc <- body_set_default_section(
+  doc,
+  prop_section(
+    page_size = page_size(orient = "landscape"),
+    page_margins = page_mar(top = 1, bottom = 1, left = 1, right = 1)
+  )
+)
+doc <- body_add_flextable(doc, ft, align = "center")
+print(doc, target = "Table_Religious_Composition_ExcNoDenom.docx")
+
+
+
+## ---- Check descriptive plots ----
+ggplot(data_exc, aes(x = religion_status, y = life_satisfaction, fill = religion_status)) + geom_boxplot() +
+  labs(title = "Life satisfaction x religious majority/minority status") 
+
+ggplot(data_exc, aes(x = religion_status, fill = factor(happiness))) +
+  geom_bar(position = "fill")  # proportion plot for ordinal variable (only 1-4)
+
+ggplot(data_exc, aes(x = religion_status, fill = factor(health))) +
+  geom_bar(position = "fill")  # proportion plot for ordinal variable (only 1-4)
+```
+
+# 2. 2S META-ANALYSIS
+
+```{r two-stage-meta-analysis}
+make_forest_plot <- function(result) {
+  outcome_var <- result$outcome
+  country_estimates <- result$country_estimates
+  meta_model <- result$meta_model
+  
+  forest_df <- country_estimates %>%
+    mutate(
+      ci.lb = estimate - 1.96 * std.error,
+      ci.ub = estimate + 1.96 * std.error
+    ) %>%
+    arrange(estimate)
+  
+  forest_df$` ` <- paste(rep(" ", 20), collapse = " ")
+  forest_df$ci_text <- sprintf("%.2f [%.2f, %.2f]",
+                               forest_df$estimate, forest_df$ci.lb, forest_df$ci.ub)
+  
+  plot_df <- forest_df[, c("country", " ", "ci_text")]
+  colnames(plot_df) <- c("Country", " ", "Mean Difference [95% CI]")
+  plot_df$Country <- as.character(plot_df$Country)
+  
+  blank_row <- c("", paste(rep(" ", 20), collapse = " "), "")
+  
+  w     <- 1 / (forest_df$std.error^2)
+  psize <- sqrt(w)
+  psize <- psize / median(psize, na.rm = TRUE)
+  psize <- pmin(pmax(psize, 0.1), 0.5)
+  
+  plot_df_with_overall <- rbind(
+    plot_df,
+    blank_row,
+    c("Overall", paste(rep(" ", 20), collapse = " "),
+      sprintf("%.2f [%.2f, %.2f]", meta_model$beta, meta_model$ci.lb, meta_model$ci.ub)),
+    blank_row
+  )
+  
+  overall_est    <- c(forest_df$estimate, NA, as.numeric(meta_model$beta), NA)
+  overall_lower  <- c(forest_df$ci.lb,   NA, meta_model$ci.lb,            NA)
+  overall_upper  <- c(forest_df$ci.ub,   NA, meta_model$ci.ub,            NA)
+  overall_sizes  <- c(psize,             NA, 1,                            NA)
+  is_summary_vec <- c(rep(FALSE, nrow(plot_df) + 1), TRUE, FALSE)
+  overall_row    <- nrow(plot_df_with_overall) - 1
+  
+  p_forest <- forest(
+    data       = plot_df_with_overall[, c("Country", " ", "Mean Difference [95% CI]")],
+    est        = overall_est,
+    lower      = overall_lower,
+    upper      = overall_upper,
+    sizes      = overall_sizes,
+    ci_column  = 2,
+    ref_line   = 0,
+    xlim       = c(-2, 2),
+    ticks_at   = seq(-2, 2, 1),
+    is_summary = is_summary_vec,
+    row_height = unit(0.38, "cm"),
+    theme = forest_theme(
+      base_size    = 9,
+      ci_lwd       = 1.2,
+      ci_Theight   = 0.2,
+      odd_row_col  = "#F0F0F0",
+      even_row_col = "white",
+      refline_gp   = gpar(lwd = 1, lty = "dashed", col = "black"),
+      summary_fill = "black",
+      summary_col  = "black",
+      plot_margin  = unit(c(5, 5, 15, 5), "mm")
+    )
+  )
+  
+  p_forest <- insert_text(p_forest,
+                          text = paste("Disparity in", tools::toTitleCase(gsub("_", " ", outcome_var))),
+                          row = 1, col = 1, part = "header", just = "left",
+                          gp = gpar(fontsize = 12, fontface = "bold"))
+  
+  p_forest <- add_border(p_forest, row = nrow(plot_df),
+                         gp = gpar(lwd = 1.0, col = "black"), part = "body")
+  
+  p_forest <- edit_plot(p_forest, row = c(overall_row - 1, overall_row, overall_row + 1),
+                        which = "background", gp = gpar(fill = "#F0F0F0", col = NA))
+  p_forest <- edit_plot(p_forest, row = overall_row, col = 1, which = "text",
+                        gp = gpar(fontface = "bold"))
+  p_forest <- edit_plot(p_forest, row = overall_row, col = 3, which = "text",
+                        gp = gpar(fontface = "bold"))
+  
+  ggsave(paste0("nodenom_forest_", outcome_var, ".jpg"), p_forest, width = 8, height = 15, dpi = 300)
+  print(p_forest)
+  p_forest
+}
+
+# Run once, save all three outcomes' meta results, then plot each
+outcomes <- c("life_satisfaction", "happiness", "health")
+meta_results <- setNames(
+  lapply(outcomes, run_two_stage_meta, data = data_exc),
+  outcomes
+)
+
+forest_plots <- lapply(meta_results, make_forest_plot)
+```
+
+## Overall interaction
+
+```{r sex-interaction}
+run_sex_interaction <- function(outcome_var) {
+  cat("\n===== SEX INTERACTION:", toupper(outcome_var), "=====\n")
+  
+  formula <- as.formula(paste(outcome_var, "~ religion_status * sex + age + (1 + religion_status | country)"))
+  
+  fit <- lmer(formula, data = data, REML = FALSE,
+              control = lmerControl(optimizer = "bobyqa"))
+  
+  print(summary(fit))
+  print(confint(fit, method = "Wald"))
+  
+  # Emmeans
+  emm <- emmeans(fit, ~ religion_status | sex, at = list(sex = c(1, 2))) %>%
+    as.data.frame() %>%
+    mutate(sex_f = factor(sex, levels = c(1, 2), labels = c("Male", "Female")),
+           outcome = outcome_var)
+  
+  return(list(fit = fit, emm = emm))
+}
+
+# Run for all three outcomes
+results_ls     <- run_sex_interaction("life_satisfaction")
+results_happy  <- run_sex_interaction("happiness")
+results_health <- run_sex_interaction("health")
+```
+
+## 2SMS
+
+```{r split-sample}
+# Split by sex
+data_male <- data_exc %>% filter(sex == 1)
+data_female <- data_exc %>% filter(sex == 2)
+
+# Check numbers
+data_male %>% nrow()
+data_female %>% nrow()
+```
+
+```{r linear-regressions}
+run_linear_reg <- function(dataset, sex_label) {
+  
+  outcomes <- c("life_satisfaction", "happiness", "health")
+  
+  results <- map_dfr(outcomes, function(outcome) {
+    
+    dataset %>% 
+      group_by(country) %>% 
+      group_modify(~ {
+        fit <- tryCatch(
+          lm(as.formula(paste(outcome, "~ religion_status + age + sex")), data = .x),
+          error = function(e) NULL
+        )
+        if (is.null(fit)) return(tibble())
+        
+        tidy(fit) %>% 
+          filter(term == "religion_statusMinority") %>% 
+          select(estimate, std.error) %>% 
+          mutate(outcome = outcome, sex_group = sex_label)
+      }) %>% 
+      ungroup()
+  })
+  
+  return(results)
+}
+
+# Run for male and female separately
+linear_reg_male <- run_linear_reg(data_male, "Male")
+linear_reg_female <- run_linear_reg(data_female, "Female")
+
+# Combine 
+linear_reg_sex <- bind_rows(linear_reg_male, linear_reg_female)
+
+```
+
+## Sex stratification
+
+```{r meta-analyses}
+meta_analysis_sex <- linear_reg_sex %>% 
+  group_by(outcome, sex_group) %>% 
+  group_modify(~ {
+    fit <- rma(yi = .x$estimate, sei = .x$std.error, method = "REML")
+    tibble(
+      estimate = fit$beta[[1]],
+      se = fit$se,
+      ci_lb = fit$ci.lb,
+      ci_ub = fit$ci.ub,
+      p = fit$pval,
+      i2 = fit$I2
+    )
+  }) %>% 
+  ungroup() %>% 
+  mutate(
+    outcome = factor(outcome,
+                     levels = c("life_satisfaction", "happiness", "health"),
+                     labels = c("Life satisfaction", "Happiness", "Health")),
+    sex_group = factor(sex_group, levels = c("Male", "Female"))
+  )
+
+print(meta_analysis_sex)
+```
+
+# 3. MODERATION BY COUNTRY-LEVEL INDICATORS
+
+```{r macro-predictors-dataset}
+# Create country macro-predictors dataset
+country_data <- data_exc %>% 
+  group_by(country) %>% 
+  summarise(
+    gri_matched = first(gri_matched),
+    shi_matched = first(shi_matched),
+    democracy_matched = first(democracy_matched),
+    gdp_matched = first(gdp_matched),
+    gini_matched = first(gini_matched)
+  )
+```
+
+Create pipeline and re-run models
+
+```{r outcome-pipeline-nodenom, results = 'markup'}
+library(ggrepel)
+library(broom.mixed)
+library(purrr)
+
+run_outcome_pipeline <- function(outcome_var, input_data) {
+  
+  df <- input_data
+  
+  cat("\n")
+  cat("========================================\n")
+  cat("  OUTCOME:", toupper(gsub("_", " ", outcome_var)), "\n")
+  cat("========================================\n")
+  
+  f <- function(rhs) as.formula(paste(outcome_var, "~", rhs))
+  
+  df <- df %>%
+    mutate(
+      log_gdp = if ("log_gdp" %in% names(df)) log_gdp else log(gdp_matched),
+      gri_category = case_when(
+        gri_matched >= 6.6 ~ "Very High",
+        gri_matched >= 4.5 ~ "High",
+        gri_matched >= 2.4 ~ "Moderate",
+        gri_matched >= 0.0 ~ "Low"
+      ),
+      gri_category = factor(gri_category, levels = c("Low", "Moderate", "High", "Very High")),
+      shi_category = case_when(
+        shi_matched >= 7.2 ~ "Very High",
+        shi_matched >= 3.6 ~ "High",
+        shi_matched >= 1.5 ~ "Moderate",
+        shi_matched >= 0.0 ~ "Low"
+      ),
+      shi_category = factor(shi_category, levels = c("Low", "Moderate", "High", "Very High"))
+    )
+  
+  # 1. Null model
+  cat("\n===== NULL MODEL =====\n")
+  null_mod <- lmer(f("1 + (1 | country)"), data = df, REML = FALSE)
+  print(summary(null_mod))
+  vc <- as.data.frame(VarCorr(null_mod))
+  var_country <- vc$vcov[vc$grp == "country" & vc$var1 == "(Intercept)"]
+  var_resid <- attr(VarCorr(null_mod), "sc")^2
+  VPC <- var_country / (var_country + var_resid)
+  cat("VPC:", VPC, "(", VPC * 100, "%)\n")
+  
+  # 2. Unadjusted
+  cat("\n===== UNADJUSTED MODEL =====\n")
+  ls_unadj <- lmer(f("religion_status + (1 | country)"), data = df, REML = FALSE)
+  print(summary(ls_unadj))
+  print(confint(ls_unadj, method = "Wald"))
+  
+  # 3. Adjusted
+  cat("\n===== ADJUSTED MODEL =====\n")
+  ls_adj <- lmer(f("religion_status + age + sex + (1 | country)"), data = df, REML = FALSE)
+  print(summary(ls_adj))
+  print(confint(ls_adj, method = "Wald"))
+  
+  # 4. Random slope
+  cat("\n===== RANDOM SLOPE MODEL =====\n")
+  ls_slope <- lmer(f("religion_status + age + sex + (1 + religion_status | country)"),
+                   data = df, REML = FALSE,
+                   control = lmerControl(optimizer = "bobyqa"))
+  print(summary(ls_slope))
+  print(confint(ls_slope, method = "Wald"))
+  
+  # 5. Likelihood ratio test
+  cat("\n===== LOG LIKELIHOOD TEST =====\n")
+  LR    <- 2 * (as.numeric(logLik(ls_slope)) - as.numeric(logLik(ls_adj)))
+  df_ll <- attr(logLik(ls_slope), "df") - attr(logLik(ls_adj), "df")
+  p     <- pchisq(LR, df = df_ll, lower.tail = FALSE)
+  cat("LR:", LR, "df:", df_ll, "p:", p, "\n")
+  
+  # Helper: continuous predictor plot
+  plot_continuous <- function(fit, predictor, x_label, df) {
+    at_list <- list(seq(min(df[[predictor]], na.rm = TRUE),
+                        max(df[[predictor]], na.rm = TRUE),
+                        length.out = 20))
+    names(at_list) <- predictor
+    
+    emm_levels <- emmeans(fit,
+                          as.formula(paste("~ religion_status |", predictor)),
+                          at = at_list)
+    emm_df <- as.data.frame(emm_levels) %>%
+      mutate(religion_status = as.character(religion_status))
+    emm_df_slim <- emm_df %>% select(religion_status, all_of(predictor), emmean)
+    
+    country_means <- df %>%
+      group_by(country, religion_status) %>%
+      summarise(
+        mean_out = mean(.data[[outcome_var]], na.rm = TRUE),
+        pred_val = mean(.data[[predictor]], na.rm = TRUE),
+        n = n(),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        pred_snapped = as.numeric(sapply(pred_val, function(d) {
+          emm_df_slim[[predictor]][which.min(abs(emm_df_slim[[predictor]] - d))]
+        }))
+      ) %>%
+      rename(!!predictor := pred_snapped) %>%
+      left_join(emm_df_slim, by = c("religion_status", predictor)) %>%
+      mutate(residual = mean_out - emmean)
+    
+    outlier_countries <- country_means %>%
+      group_by(religion_status) %>%
+      mutate(z_resid = scale(residual)) %>%
+      ungroup() %>%
+      filter(abs(z_resid) > 1.5) %>%
+      pull(country) %>%
+      unique()
+    
+    country_outliers <- country_means %>% filter(country %in% outlier_countries)
+    
+    p <- ggplot(emm_df, aes(x = .data[[predictor]], y = emmean, color = religion_status)) +
+      geom_line(linewidth = 1) +
+      geom_ribbon(aes(ymin = asymp.LCL, ymax = asymp.UCL, fill = religion_status),
+                  alpha = 0.2, color = NA) +
+      geom_point(data = country_means,
+                 aes(x = pred_val, y = mean_out, size = n, color = religion_status),
+                 alpha = 0.6) +
+      scale_size_continuous(name = "Sample size", range = c(2, 10)) +
+      geom_text_repel(data = country_outliers,
+                      aes(x = pred_val, y = mean_out, label = country),
+                      size = 3, max.overlaps = 15, show.legend = FALSE) +
+      scale_color_manual(values = c("Majority" = "#04BFAF", "Minority" = "#0B2A5B")) +
+      labs(x = x_label, y = paste("Mean", gsub("_", " ", outcome_var)),
+           title = paste(tools::toTitleCase(gsub("_", " ", outcome_var)),
+                         "by minority/majority status across", x_label),
+           color = "Religion status", fill = "Religion status") +
+      theme_minimal() +
+      theme(plot.title = element_text(hjust = 0.5))
+    
+    ggsave(paste0("nodenom_emmeans_", predictor, "_", outcome_var, ".jpg"),
+           p, width = 12, height = 6.8, dpi = 300)
+    print(p)
+  }
+  
+  # Helper: categorical predictor plot + corrected simple effects
+  plot_categorical <- function(fit, predictor, x_label, df) {
+    emm_cat <- emmeans(fit, as.formula(paste("~ religion_status |", predictor)))
+    emm_df_cat <- as.data.frame(emm_cat) %>%
+      mutate(religion_status = as.character(religion_status))
+    
+    country_means <- df %>%
+      filter(!is.na(.data[[predictor]])) %>%
+      group_by(country, religion_status, .data[[predictor]]) %>%
+      summarise(mean_out = mean(.data[[outcome_var]], na.rm = TRUE), n = n(), .groups = "drop") %>%
+      left_join(emm_df_cat %>% select(religion_status, all_of(predictor), emmean),
+                by = c("religion_status", predictor)) %>%
+      mutate(residual = mean_out - emmean)
+    
+    outlier_countries <- country_means %>%
+      group_by(religion_status) %>%
+      mutate(z_resid = scale(residual)) %>%
+      ungroup() %>%
+      filter(abs(z_resid) > 1.5) %>%
+      pull(country) %>%
+      unique()
+    
+    country_outliers <- country_means %>% filter(country %in% outlier_countries)
+    
+    p <- ggplot(emm_df_cat, aes(x = .data[[predictor]], y = emmean,
+                                color = religion_status, group = religion_status)) +
+      geom_line(linewidth = 1) +
+      geom_point(size = 3) +
+      geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 0.2) +
+      geom_point(data = country_means,
+                 aes(x = .data[[predictor]], y = mean_out, size = n, color = religion_status),
+                 alpha = 0.4,
+                 position = position_jitterdodge(jitter.width = 0.05, dodge.width = 0.3)) +
+      scale_size_continuous(name = "Sample size", range = c(1, 7)) +
+      geom_text_repel(data = country_outliers,
+                      aes(x = .data[[predictor]], y = mean_out, label = country),
+                      size = 3, max.overlaps = 15, show.legend = FALSE) +
+      scale_color_manual(values = c("Majority" = "#04BFAF", "Minority" = "#0B2A5B")) +
+      labs(x = x_label, y = paste("Mean", gsub("_", " ", outcome_var)),
+           title = paste(tools::toTitleCase(gsub("_", " ", outcome_var)),
+                         "by religious status across", x_label),
+           color = "Religion status") +
+      theme_minimal() +
+      theme(plot.title = element_text(hjust = 0.5))
+    
+    ggsave(paste0("nodenom_emmeans_", predictor, "_", outcome_var, ".jpg"),
+           p, width = 12, height = 6.8, dpi = 300)
+    print(p)
+    
+    # Simple effects: Minority − Majority gap at each category
+    gaps <- pairs(emm_cat, reverse = TRUE)
+    
+    cat("\n--- Simple effects (unadjusted) ---\n")
+    print(summary(gaps, infer = c(TRUE, TRUE)))
+    
+    cat("\n--- Simple effects (mvt-adjusted across", nlevels(df[[predictor]]), "categories) ---\n")
+    gaps_adj <- summary(gaps, by = NULL, adjust = "mvt", infer = c(TRUE, TRUE))
+    print(gaps_adj)
+    
+    invisible(gaps_adj)
+  }
+  
+  # 6. GRI continuous
+  cat("\n===== GRI CONTINUOUS =====\n")
+  fit_gri <- lmer(f("religion_status * gri_matched + age + sex + (1 + religion_status | country)"),
+                  data = df, REML = FALSE)
+  print(summary(fit_gri)); print(confint(fit_gri, method = "Wald", level = 0.90))
+  plot_continuous(fit_gri, "gri_matched", "Government Restrictions Index (GRI)", df)
+  
+  # 7. GRI categorical
+  cat("\n===== GRI CATEGORICAL =====\n")
+  fit_gri_cat <- lmer(f("religion_status * gri_category + age + sex + (1 + religion_status | country)"),
+                      data = df, REML = FALSE)
+  print(summary(fit_gri_cat)); print(confint(fit_gri_cat, method = "Wald", level = 0.90))
+  gri_simple <- plot_categorical(fit_gri_cat, "gri_category", "Government Restrictions Index (GRI)", df)
+  
+  # 8. SHI continuous
+  cat("\n===== SHI CONTINUOUS =====\n")
+  fit_shi <- lmer(f("religion_status * shi_matched + age + sex + (1 + religion_status | country)"),
+                  data = df, REML = FALSE)
+  print(summary(fit_shi)); print(confint(fit_shi, method = "Wald", level = 0.90))
+  plot_continuous(fit_shi, "shi_matched", "Social Hostilities Index (SHI)", df)
+  
+  # 9. SHI categorical
+  cat("\n===== SHI CATEGORICAL =====\n")
+  fit_shi_cat <- lmer(f("religion_status * shi_category + age + sex + (1 + religion_status | country)"),
+                      data = df, REML = FALSE)
+  print(summary(fit_shi_cat)); print(confint(fit_shi_cat, method = "Wald", level = 0.90))
+  shi_simple <- plot_categorical(fit_shi_cat, "shi_category", "Social Hostilities Index (SHI)", df)
+  
+  # 10. Democracy
+  cat("\n===== DEMOCRACY =====\n")
+  fit_dem <- lmer(f("religion_status * democracy_matched + age + sex + (1 + religion_status | country)"),
+                  data = df, REML = FALSE)
+  print(summary(fit_dem)); print(confint(fit_dem, method = "Wald", level = 0.90))
+  plot_continuous(fit_dem, "democracy_matched", "Democracy Index", df)
+  
+  # 11. GDP
+  cat("\n===== GDP =====\n")
+  fit_gdp <- lmer(f("religion_status * log_gdp + age + sex + (1 + religion_status | country)"),
+                  data = df, REML = FALSE)
+  print(summary(fit_gdp)); print(confint(fit_gdp, method = "Wald", level = 0.90))
+  plot_continuous(fit_gdp, "log_gdp", "Log GDP per capita", df)
+  
+  # 12. Gini
+  cat("\n===== GINI =====\n")
+  fit_gini <- lmer(f("religion_status * gini_matched + age + sex + (1 + religion_status | country)"),
+                   data = df, REML = FALSE)
+  print(summary(fit_gini)); print(confint(fit_gini, method = "Wald", level = 0.90))
+  plot_continuous(fit_gini, "gini_matched", "Gini Index", df)
+  
+  invisible(list(
+    null = null_mod, unadj = ls_unadj, adj = ls_adj, slope = ls_slope,
+    gri = fit_gri, gri_cat = fit_gri_cat, gri_simple = gri_simple,
+    shi = fit_shi, shi_cat = fit_shi_cat, shi_simple = shi_simple,
+    democracy = fit_dem, gdp = fit_gdp, gini = fit_gini
+  ))
+}
+
+set.seed(2026)
+results_ls_nodenom     <- run_outcome_pipeline("life_satisfaction", data_exc)
+results_happy_nodenom  <- run_outcome_pipeline("happiness", data_exc)
+results_health_nodenom <- run_outcome_pipeline("health", data_exc)
+```
+
+```{r nodenom-summary-tables}
+all_nodenom <- list(life_satisfaction = results_ls_nodenom,
+                    happiness         = results_happy_nodenom,
+                    health            = results_health_nodenom)
+
+# 1. Overall minority − majority gap (random slope model, 95% CI, α = 0.05)
+main_gap_nodenom <- imap_dfr(all_nodenom, function(res, outcome) {
+  tidy(res$slope, effects = "fixed", conf.int = TRUE,
+       conf.level = 0.95, conf.method = "Wald") %>%
+    filter(term == "religion_statusMinority") %>%
+    mutate(outcome = outcome)
+}) %>%
+  transmute(outcome, estimate, conf.low, conf.high, p.value,
+            clear = if_else(p.value < 0.05, "yes", "no"))
+
+knitr::kable(main_gap_nodenom, digits = 3,
+             caption = "Excluding no denomination: overall minority − majority gap (95% CI, α = 0.05)")
+
+# 2. All interaction terms (90% CI, α = 0.10)
+interactions_nodenom <- imap_dfr(all_nodenom, function(res, outcome) {
+  map_dfr(c("gri", "gri_cat", "shi", "shi_cat", "democracy", "gdp", "gini"), function(m) {
+    tidy(res[[m]], effects = "fixed", conf.int = TRUE,
+         conf.level = 0.90, conf.method = "Wald") %>%
+      filter(grepl(":", term)) %>%
+      mutate(model = m)
+  }) %>% mutate(outcome = outcome)
+}) %>%
+  transmute(outcome, model,
+            term = gsub("religion_statusMinority:", "", term),
+            estimate, conf.low, conf.high, p.value,
+            clear = if_else(p.value < 0.10, "yes", "no"))
+
+knitr::kable(interactions_nodenom, digits = 3,
+             caption = "Excluding no denomination: interaction terms (90% Wald CI, α = 0.10)")
+
+# 3. Omnibus test of category interactions (α = 0.10)
+omnibus_nodenom <- imap_dfr(all_nodenom, function(res, outcome) {
+  map_dfr(c(GRI = "gri_cat", SHI = "shi_cat"), function(m) {
+    a   <- anova(res[[m]])
+    row <- a[grepl(":", rownames(a)), ]
+    tibble(F = row$`F value`, NumDF = row$NumDF, DenDF = row$DenDF, p.value = row$`Pr(>F)`)
+  }, .id = "index") %>% mutate(outcome = outcome)
+}) %>%
+  transmute(outcome, index, F, NumDF, DenDF, p.value,
+            clear = if_else(p.value < 0.10, "yes", "no"))
+
+knitr::kable(omnibus_nodenom, digits = 3,
+             caption = "Excluding no denomination: omnibus test of religion status × category (α = 0.10)")
+
+# 4. Corrected simple effects (mvt-adjusted 95% CI, α = 0.05)
+simple_effects_nodenom <- imap_dfr(all_nodenom, function(res, outcome) {
+  bind_rows(
+    GRI = as.data.frame(res$gri_simple) %>% rename(category = gri_category),
+    SHI = as.data.frame(res$shi_simple) %>% rename(category = shi_category),
+    .id = "index"
+  ) %>% mutate(outcome = outcome)
+}) %>%
+  rename(any_of(c(lower.CL = "asymp.LCL", upper.CL = "asymp.UCL"))) %>%
+  transmute(outcome, index, category = as.character(category), estimate,
+            lower.CL, upper.CL, p.value,
+            clear = if_else(p.value < 0.05, "yes", "no"))
+
+knitr::kable(simple_effects_nodenom, digits = 3,
+             caption = "Excluding no denomination: minority − majority gap by category (mvt-adjusted 95% CI, α = 0.05)")
+```
+
+```{r figure4, fig.width=6.5, fig.height=8}
+outcome_var <- "life_satisfaction"
+
+df <- data %>%
+  mutate(
+    gri_category = factor(case_when(
+      gri_matched >= 6.6 ~ "Very High",
+      gri_matched >= 4.5 ~ "High",
+      gri_matched >= 2.4 ~ "Moderate",
+      gri_matched >= 0.0 ~ "Low"
+    ), levels = c("Low", "Moderate", "High", "Very High")),
+    shi_category = factor(case_when(
+      shi_matched >= 7.2 ~ "Very High",
+      shi_matched >= 3.6 ~ "High",
+      shi_matched >= 1.5 ~ "Moderate",
+      shi_matched >= 0.0 ~ "Low"
+    ), levels = c("Low", "Moderate", "High", "Very High"))
+  )
+
+panel_categorical <- function(predictor, x_label) {
+  fit <- lmer(as.formula(paste0(
+    outcome_var, " ~ religion_status * ", predictor,
+    " + age + sex + (1 + religion_status | country)")),
+    data = df, REML = FALSE,
+    control = lmerControl(optimizer = "bobyqa"))
+  
+  emm <- emmeans(fit, as.formula(paste("~ religion_status |", predictor)))
+  emm_df <- as.data.frame(emm) %>%
+    mutate(religion_status = as.character(religion_status))
+  
+  country_means <- df %>%
+    filter(!is.na(.data[[predictor]])) %>%
+    group_by(country, religion_status, .data[[predictor]]) %>%
+    summarise(mean_out = mean(.data[[outcome_var]], na.rm = TRUE),
+              n = n(), .groups = "drop")
+  
+  cat("\n===== ", toupper(predictor), " =====\n", sep = "")
+  print(summary(pairs(emm, reverse = TRUE), infer = c(TRUE, TRUE)))
+  
+  ggplot(emm_df, aes(x = .data[[predictor]], y = emmean,
+                     color = religion_status, group = religion_status)) +
+    geom_point(data = country_means,
+               aes(x = .data[[predictor]], y = mean_out, size = n,
+                   color = religion_status),
+               alpha = 0.25,
+               position = position_jitterdodge(jitter.width = 0.05,
+                                               dodge.width = 0.3)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 3) +
+    geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 0.15) +
+    scale_size_continuous(name = "Sample size", range = c(1, 6)) +
+    scale_color_manual(values = c("Majority" = "#04BFAF",
+                                  "Minority" = "#0B2A5B"),
+                       name = "Religion status") +
+    labs(x = x_label, y = "Mean life satisfaction") +
+    theme_minimal(base_size = 11)
+}
+
+p_gri <- panel_categorical("gri_category", "Government Restrictions Index")
+p_shi <- panel_categorical("shi_category", "Social Hostilities Index")
+
+combined <- (p_gri / p_shi) +
+  plot_layout(guides = "collect") +
+  plot_annotation(
+    title = "Life satisfaction among religious minorities and majorities\nby government restrictions and social hostilities",
+    tag_levels = "A",
+    theme = theme(plot.title = element_text(hjust = 0.5, size = 12))
+  ) &
+  theme(legend.position = "right",
+        legend.box = "vertical",
+        plot.margin = margin(t = 6, r = 6, b = 6, l = 6))
+
+ggsave("nodenom_emmeans_lifesatisfaction_GRI_SHI.svg", plot = combined,
+       width = 7.5, height = 6.5)
+print(combined)
+```
+
+# 4. MODERATION BY MINORITY GROUP SIZE
+
+Check minority group sizes
+
+```{r check-minority-sizes}
+# Group size from WRD 2020 demographics (% of national population), not the WVS sample
+data_exc <- data_exc %>%
+  select(-any_of("pct_own_group")) %>%
+  mutate(pct_own_group = case_when(
+    religion_wrd == "Christian"                ~ christian_pct,
+    religion_wrd == "Muslim"                   ~ muslim_pct,
+    religion_wrd == "Hindu"                    ~ hindu_pct,
+    religion_wrd == "Buddhist"                 ~ buddhist_pct,
+    religion_wrd == "Jew"                      ~ jew_pct,
+    religion_wrd == "Daoist"                   ~ daoist_pct,
+    religion_wrd == "Confucianist"             ~ confucianist_pct,
+    religion_wrd == "Ethnic_religionist"       ~ ethnic_religionist_pct,
+    religion_wrd == "Shintoist"                ~ shintoist_pct,
+    religion_wrd == "Sikh"                     ~ sikh_pct,
+    religion_wrd == "Spiritist"                ~ spiritist_pct,
+    religion_wrd == "Jain"                     ~ jain_pct,
+    religion_wrd == "Chinese_folk_religionist" ~ chinese_folk_religionist_pct,
+    religion_wrd == "Other"                    ~ other_religion_pct,
+    .default = NA_real_
+  ))
+
+# Checks
+# No denomination should be gone
+data_exc %>% count(religion_wrd == "No_Denomination")
+
+# Any minorities without a WRD share? (should be none)
+data_exc %>%
+  filter(religion_status == "Minority", is.na(pct_own_group)) %>%
+  count(religion_wrd)
+
+# Smallest minority groups
+data_exc %>%
+  filter(religion_status == "Minority") %>%
+  distinct(country, religion_wrd, pct_own_group) %>%
+  arrange(pct_own_group) %>%
+  head(20)
+
+# Minorities above 50% (should be none)
+data_exc %>%
+  filter(religion_status == "Minority", pct_own_group > 50) %>%
+  distinct(country, religion_wrd, pct_own_group)
+```
+
+Run moderation
+
+```{r moderation-minority-group-size}
+# Interaction built by hand: group size applies to minorities only (0 for majorities),
+# centred at 10%. Coefficient = change in the minority–majority gap per percentage point.
+data_exc <- data_exc %>%
+  mutate(minority_x_size = if_else(religion_status == "Minority", pct_own_group - 10, 0))
+
+run_minsize <- function(outcome_var) {
+  cat("\n===== MINORITY GROUP SIZE (EXCL. NO DENOMINATION):",
+      toupper(gsub("_", " ", outcome_var)), "=====\n")
+  fit <- lmer(
+    as.formula(paste(outcome_var,
+                     "~ religion_status + minority_x_size + age + sex + (1 + religion_status | country)")),
+    data = data_exc, REML = FALSE,
+    control = lmerControl(optimizer = "bobyqa")
+  )
+  print(summary(fit))
+  
+  ci90 <- confint(fit, parm = "minority_x_size", method = "Wald", level = 0.90)
+  ci95 <- confint(fit, parm = "religion_statusMinority", method = "Wald", level = 0.95)
+  
+  cat("\nGap for a 10% minority (95% CI):",
+      round(fixef(fit)["religion_statusMinority"], 3), "[",
+      round(ci95[1], 3), ",", round(ci95[2], 3), "]\n")
+  cat("Change in gap per 10 pp larger minority (90% CI):",
+      round(10 * fixef(fit)["minority_x_size"], 3), "[",
+      round(10 * ci90[1], 3), ",", round(10 * ci90[2], 3), "]\n")
+  fit
+}
+
+fit_minsize_ls_exc     <- run_minsize("life_satisfaction")
+fit_minsize_happy_exc  <- run_minsize("happiness")
+fit_minsize_health_exc <- run_minsize("health")
+```

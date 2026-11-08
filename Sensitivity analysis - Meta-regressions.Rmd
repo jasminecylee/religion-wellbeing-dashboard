@@ -1,0 +1,344 @@
+---
+title: "Sensitivity Analysis - Meta-regressions"
+author: "Jasmine Lee"
+date: "2026-03-09"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+---
+
+################################################################################ 
+
+# 0. OVERVIEW & SETUP
+
+################################################################################ 
+
+This script presents [sensitivity analyses]{.underline} with [two-stage meta-regressions]{.underline}, to complement multilevel models with interactions in the main analyses.
+
+For main analyses, see 'Main analyses.Rmd'. For sex-disaggregated analyses, see 'Sex disaggregated.Rmd'.
+
+For other sensitivity analyses, see
+
+- 'Sensitivity analysis - Excluding no denomination.Rmd' for repeat of all analyses excluding no denomination group
+
+- 'Sensitivity analysis - Largest group.Rmd' for repeat of all analyses with the largest group as majority (rather than \>50%)
+
+**Setup**
+
+Load functions, file paths, and packages
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# Set cran repo
+options(repos = c(
+  CRAN      = "https://cloud.r-project.org",
+  CRANextra = "https://cloud.r-project.org"
+))
+
+
+# Load packages (and update if necessary)
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  # Data wrangling
+  tidyverse, dplyr, broom,
+  # Models
+  lme4, lmerTest, emmeans, metafor, purrr,
+  # Visualisations
+  visdat, ggplot2, flextable, officer, sf, countrycode, rnaturalearth, grid, scales, forestploter, ggrepel
+)
+
+# Read in cleaned dataset
+data <- readRDS("data_main_analyses.rds")
+country_data <- readRDS("country_data.rds")
+country_estimates <- readRDS("country_estimates_ls.rds")
+country_estimates_hap <- readRDS("country_estimates_hap.rds")
+country_estimates_gh <- readRDS("country_estimates_gh.rds")
+
+# Check data
+data %>% colnames()
+data %>% nrow() # n = 79,152 - correct
+```
+
+################################################################################ 
+
+# 1. RANDOM-EFFECTS META-REGRESSIONS
+
+################################################################################ 
+
+In the main analyses we have conducted two-stage meta-analysis, we now add country-level predictors to conduct meta-regressions.
+
+```{r load-data}
+country_data <- readRDS("country_data.rds")
+country_estimates <- readRDS("country_estimates_ls.rds")
+country_estimates_hap <- readRDS("country_estimates_hap.rds")
+country_estimates_gh <- readRDS("country_estimates_gh.rds")
+
+# Transform
+country_data <- country_data %>%
+  mutate(
+    gri_category = case_when(
+      gri_matched >= 6.6 ~ "Very High",
+      gri_matched >= 4.5 ~ "High",
+      gri_matched >= 2.4 ~ "Moderate",
+      gri_matched >= 0   ~ "Low"          # NA stays NA
+    ),
+    gri_category = factor(gri_category, levels = c("Low","Moderate","High","Very High")),
+    
+    shi_category = case_when(
+      shi_matched >= 7.2 ~ "Very High",
+      shi_matched >= 3.6 ~ "High",
+      shi_matched >= 1.5 ~ "Moderate",
+      shi_matched >= 0   ~ "Low"          # NA stays NA
+    ),
+    shi_category = factor(shi_category, levels = c("Low","Moderate","High","Very High")),
+    
+    log_gdp = log(gdp_matched)
+  )
+
+# Merge 
+country_estimates <- country_estimates %>%
+  left_join(country_data, by = "country")
+
+country_estimates_hap <- country_estimates_hap %>%
+  left_join(country_data, by = "country")
+
+country_estimates_gh <- country_estimates_gh %>%
+  left_join(country_data, by = "country")
+
+# Check 
+names(country_estimates)
+```
+
+We want to create a loop that does the meta-regression for each of the country predictors for all 3 outcomes without having to copy and paste many lines of code.
+
+```{r meta-regression-function}
+
+# Create loop
+run_meta_regression <- function(data, predictor) {
+  
+  df <- data %>%
+    select(country, estimate, std.error, all_of(predictor)) %>%
+    filter(
+      !is.na(estimate),
+      !is.na(std.error),
+      !is.na(.data[[predictor]])
+    )
+  
+  # Null model
+  null_model <- rma(
+    yi = estimate,
+    sei = std.error,
+    data = df,
+    method = "REML"
+  )
+  
+  # Meta-regression
+  meta_reg <- rma(
+    yi = estimate,
+    sei = std.error,
+    mods = as.formula(paste("~", predictor)),
+    data = df,
+    method = "REML",
+    level = 90
+  )
+  
+  # Pseudo R²
+  tau2_null  <- null_model$tau2
+  tau2_model <- meta_reg$tau2
+  
+  pseudo_r2 <- if (!is.na(tau2_null) && tau2_null > 0) {
+    100 * (tau2_null - tau2_model) / tau2_null
+  } else {
+    NA_real_
+  }
+  
+  pseudo_r2 <- ifelse(pseudo_r2 < 0, 0, pseudo_r2)
+  
+  coef_table <- as.data.frame(coef(summary(meta_reg)))
+  coef_table$term <- rownames(coef_table)
+  rownames(coef_table) <- NULL
+  
+  names(coef_table) <- c("estimate", "se", "zval", "pval", "ci_lb", "ci_ub", "term")
+  
+  coef_table <- coef_table %>%
+    mutate(
+      predictor = predictor,
+      n_countries = nrow(df),
+      QM = meta_reg$QM,
+      QM_p = meta_reg$QMp,
+      tau2_null = tau2_null,
+      tau2_model = tau2_model,
+      pseudo_r2 = pseudo_r2
+    ) %>%
+    select(
+      predictor,
+      term,
+      estimate,
+      se,
+      ci_lb,
+      ci_ub,
+      pval,
+      n_countries,
+      QM,
+      QM_p,
+      tau2_null,
+      tau2_model,
+      pseudo_r2
+    )
+  
+    list(
+    predictor = predictor,
+    n_countries = nrow(df),
+    model = meta_reg,
+    results = coef_table
+  )
+  
+}
+```
+
+Now we review the summary of the random-effects meta-regressions.
+
+```{r meta-regression-summary}
+predictors <- c(
+  "gri_category",
+  "shi_category",
+  "democracy_matched",
+  "log_gdp",
+  "gini_matched"
+)
+
+country_estimates <- country_estimates %>%
+  mutate(across(c(gri_category, shi_category),
+                ~ factor(.x, levels = c("Low", "Moderate", "High", "Very High"))))
+
+meta_regs_ls <- setNames(lapply(predictors, \(x) run_meta_regression(country_estimates, x)), predictors)
+meta_regs_hap <- setNames(lapply(predictors, \(x) run_meta_regression(country_estimates_hap, x)), predictors)
+meta_regs_gh <- setNames(lapply(predictors, \(x) run_meta_regression(country_estimates_gh, x)), predictors)
+
+meta_reg_ls_table <- bind_rows(lapply(meta_regs_ls, \(x) x$results)) %>%
+  mutate(outcome = "Life satisfaction", .before = 1)
+
+meta_reg_hap_table <- bind_rows(lapply(meta_regs_hap, \(x) x$results)) %>%
+  mutate(outcome = "Happiness", .before = 1)
+
+meta_reg_gh_table <- bind_rows(lapply(meta_regs_gh, \(x) x$results)) %>%
+  mutate(outcome = "General health", .before = 1)
+
+meta_reg_results <- bind_rows(meta_reg_ls_table, meta_reg_hap_table, meta_reg_gh_table)
+meta_reg_results
+```
+
+Although not reported, we want to visualise the plots and compare to the mixed-effects models previously completed.
+
+```{r meta-regression-plots}
+plot_meta_regression <- function(meta_reg_obj, predictor, outcome_label, data) {
+  
+  # For categorical predictors
+  if (predictor %in% c("gri_category", "shi_category")) {
+    
+    # Get fitted values per category
+    pred_df <- data %>%
+      filter(!is.na(.data[[predictor]]), !is.na(estimate), !is.na(std.error)) %>%
+      mutate(category = .data[[predictor]],
+             precision = 1 / std.error^2)
+    
+    # Get meta-regression predictions per category
+    fit <- meta_reg_obj$model
+    pred_levels <- levels(pred_df$category)
+    
+    ggplot(pred_df, aes(x = category, y = estimate)) +
+      geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+      geom_point(aes(size = precision), colour = "#0B2A5B", alpha = 0.4) +
+      stat_summary(fun = "mean", geom = "point", 
+                   size = 4, shape = 18, colour = "#04BFAF") +
+      scale_size_continuous(name = "Precision (1/SE²)", range = c(1, 8)) +
+      labs(
+        x = ifelse(predictor == "gri_category", 
+                   "Government Restrictions Index (GRI)",
+                   "Social Hostilities Index (SHI)"),
+        y = "Country-level minority-majority gap estimate",
+        title = paste(outcome_label, "— meta-regression:", 
+                      ifelse(predictor == "gri_category", "GRI", "SHI"))
+      ) +
+      theme_minimal() +
+      theme(panel.grid.minor = element_blank())
+    
+  } else {
+    
+    # For continuous predictors — bubble plot
+    pred_df <- data %>%
+      filter(!is.na(.data[[predictor]]), !is.na(estimate), !is.na(std.error)) %>%
+      mutate(precision = 1 / std.error^2)
+    
+    # Get regression line from model
+    x_seq <- seq(min(pred_df[[predictor]], na.rm = TRUE),
+                 max(pred_df[[predictor]], na.rm = TRUE),
+                 length.out = 100)
+    
+    # Predicted values from meta-regression
+    new_data <- data.frame(x_seq)
+    names(new_data) <- predictor
+    pred_line <- predict(meta_reg_obj$model, newmods = x_seq)
+    
+    line_df <- data.frame(
+      x = x_seq,
+      pred = pred_line$pred,
+      ci_lb = pred_line$ci.lb,
+      ci_ub = pred_line$ci.ub
+    )
+    
+    x_label <- case_when(
+      predictor == "log_gdp"          ~ "Log GDP per capita",
+      predictor == "democracy_matched" ~ "Democracy Index",
+      predictor == "gini_matched"      ~ "Gini Index",
+      TRUE ~ predictor
+    )
+    
+    ggplot() +
+      geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+      geom_ribbon(data = line_df,
+                  aes(x = x, ymin = ci_lb, ymax = ci_ub),
+                  alpha = 0.15, fill = "#04BFAF") +
+      geom_line(data = line_df,
+                aes(x = x, y = pred),
+                colour = "#04BFAF", linewidth = 1) +
+      geom_point(data = pred_df,
+                 aes(x = .data[[predictor]], y = estimate, size = precision),
+                 colour = "#0B2A5B", alpha = 0.5) +
+      geom_text_repel(data = pred_df,
+                      aes(x = .data[[predictor]], y = estimate, label = country),
+                      size = 3, max.overlaps = 10) +
+      scale_size_continuous(name = "Precision (1/SE²)", range = c(1, 8)) +
+      labs(
+        x = x_label,
+        y = "Country-level minority-majority gap estimate",
+        title = paste(outcome_label, "— meta-regression:", x_label)
+      ) +
+      theme_minimal() +
+      theme(panel.grid.minor = element_blank())
+  }
+}
+
+# Generate plots for life satisfaction
+for (pred in predictors) {
+  p <- plot_meta_regression(meta_regs_ls[[pred]], pred, "Life satisfaction", country_estimates)
+  print(p)
+}
+
+# Generate plots for happiness
+for (pred in predictors) {
+  p <- plot_meta_regression(meta_regs_hap[[pred]], pred, "Happiness", country_estimates_hap)
+  print(p)
+}
+
+# Generate plots for general health
+for (pred in predictors) {
+  p <- plot_meta_regression(meta_regs_gh[[pred]], pred, "General health", country_estimates_gh)
+  print(p)
+}
+```
+
+Now this has all worked well, but for religious minority group size we can't easily run meta-regressions because there isn't a single value for each country of religious minority group size like the other country-level indices. We will keep only results from multi-level models and not run meta-regressions.

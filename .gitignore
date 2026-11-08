@@ -8,3 +8,11 @@ rsconnect/
 .DS_Store
 .DS_Store
 data/
+*.rds
+*.csv
+*.sav
+*.xlsx
+*.dta
+*.html
+*.docx
+*.pdf
