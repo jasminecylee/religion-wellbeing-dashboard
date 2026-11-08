@@ -1,7 +1,7 @@
 ---
 title: "Prepare dashboard data"
 author: "Jasmine Lee"
-date: "2026-07-26"
+date: "2026-11-08"
 output:
   html_document:
     toc: true
@@ -14,7 +14,17 @@ editor_options:
 
 # 0. OVERVIEW & SETUP
 
-### **Setup**
+This script builds the aggregated files for the Shiny dashboard. It
+reads two files saved from Main Analysis Rmd:
+
+- `data_analytic.rds`: the analytic sample (54 countries, WRD-based
+  majority/minority status, negative outcome codes already set to NA).
+  Used for descriptive tables.
+- `dashboard_model_outputs.rds`: country-level adjusted gaps (stage 1),
+  pooled meta-analysis results, VPCs, country indicators, and GRI/SHI
+  moderation results. These are the numbers in the paper.
+
+### Setup
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
@@ -24,12 +34,13 @@ options(repos = c(CRAN = "https://cloud.r-project.org"))
 if (!require("pacman")) install.packages("pacman")
 pacman::p_load(tidyverse, countrycode)
 
-# Read in cleaned dataset (not committed to the repository)
-data <- readRDS("data.rds")
+# Inputs from the Main Analysis (not committed to the repository)
+data          <- readRDS("data_analytic.rds")
+model_outputs <- readRDS("dashboard_model_outputs.rds")
 
 data %>% nrow()
-data %>% dplyr::select(country, religion_wrd, life_satisfaction, happiness,
-                       health, age, sex, survey_weight) %>% glimpse()
+data$country %>% n_distinct()                 # should be 54
+data %>% count(religion_status, useNA = "ifany")
 ```
 
 Helper functions
@@ -50,130 +61,100 @@ w_se <- function(x, w) {
   v     <- sum(w * (x - m)^2) / sum(w)  # weighted variance
   sqrt(v / n_eff)
 }
-```
-
-# 1. CATEGORISE MAJORITY/MINORITY STATUS
-
-Individuals will be classified as belonging to majority or minority
-religious groups according to the World Values Survey overall sample.
-
-## Clean outcomes & weights
-
-```{r clean-outcomes}
-data <- data %>%
-  mutate(
-    life_satisfaction = if_else(life_satisfaction < 0, NA_real_, as.numeric(life_satisfaction)),
-    happiness         = as.numeric(happiness),
-    health            = as.numeric(health),
-    survey_weight     = if_else(is.na(survey_weight) | survey_weight <= 0, 1, survey_weight)
-  )
-
-# Keep only respondents with a religious affiliation reported
-data <- data %>% filter(!is.na(religion_wrd))
-
-data %>% nrow()
-```
-
-## Country religious composition (according to WVS sample)
-
-```{r wvs-composition}
-wvs_composition <- data %>%
-  group_by(country) %>%
-  mutate(country_w = sum(survey_weight)) %>%
-  group_by(country, religion_wrd) %>%
-  summarise(
-    n         = n(),
-    n_w       = sum(survey_weight),
-    country_w = first(country_w),
-    .groups   = "drop"
-  ) %>%
-  mutate(share = 100 * n_w / country_w) %>%
-  arrange(country, desc(share))
-
-wvs_composition %>% slice_head(n = 10)
 
 tidy_religion <- function(x) {
   x %>%
     gsub("_", " ", .) %>%
-    gsub("No denomination", "No religious denomination", .) %>%
+    gsub("No [Dd]enomination", "No religious denomination", .) %>%
     gsub("^Jew$", "Jewish", .) %>%
     gsub("Ethnic religionist", "Ethnic religions", .) %>%
     gsub("Chinese folk religionist", "Chinese folk religions", .) %>%
     gsub("Other religion$", "Other", .)
 }
+
+outcome_labels <- c(
+  life_satisfaction = "Life satisfaction (1–10)",
+  happiness         = "Happiness (1–4)",
+  health            = "Self-rated health (1–5)"
+)
 ```
 
-## Identify the majority group
+# 1. CHECK INPUTS
 
-Majority definition: the religious group holding **more than 50%** of
-the weighted WVS sample in that country. Countries with no such group
-are dropped.
+Majority/minority status was assigned in the Main Analysis code file
+(majority = religion with \>50% of the national population, World
+Religion Database). Here we only check the inputs are consistent with
+each other.
 
-```{r identify-majority}
-country_majority <- wvs_composition %>%
-  group_by(country) %>%
-  slice_max(share, n = 1, with_ties = FALSE) %>%
-  ungroup() %>%
-  transmute(
-    country,
-    majority_religion = religion_wrd,
-    majority_share    = share,
-    has_majority      = share > 50
-  )
+```{r check-inputs}
+# Outcomes should already be clean (no negative codes)
+data %>%
+  summarise(across(c(life_satisfaction, happiness, health),
+                   list(min = ~ min(.x, na.rm = TRUE), max = ~ max(.x, na.rm = TRUE))))
+stopifnot(min(data$life_satisfaction, na.rm = TRUE) >= 1,
+          min(data$happiness,         na.rm = TRUE) >= 1,
+          min(data$health,            na.rm = TRUE) >= 1)
 
-# Countries with no majority group in the WVS sample
-country_majority %>% filter(!has_majority) %>% arrange(desc(majority_share))
+# Same countries in the data and in the model outputs
+countries_data   <- sort(unique(data$country))
+countries_models <- sort(unique(model_outputs$country_estimates$country))
+setdiff(countries_data, countries_models)   # should be empty
+setdiff(countries_models, countries_data)   # should be empty
 
-country_majority <- country_majority %>% filter(has_majority)
-
-data <- data %>%
-  inner_join(country_majority %>% dplyr::select(country, majority_religion),
-             by = "country")
-
-data$country %>% n_distinct()
-```
-
-## Categorise individuals
-
-```{r categorise-individuals}
+# Survey weights: replace missing/non-positive with 1
 data <- data %>%
   mutate(
-    religion_status = if_else(religion_wrd == majority_religion, "Majority", "Minority"),
+    survey_weight   = if_else(is.na(survey_weight) | survey_weight <= 0, 1, survey_weight),
     religion_status = factor(religion_status, levels = c("Majority", "Minority"))
   )
-
-data %>% count(religion_status)
 ```
 
-## Drop countries with very small minority samples
+World Religion Database shares
 
-Countries where the minority makes up less than 1% of the sample are
-dropped — the comparison would not be meaningful.
+```{r wrd-shares}
+religion_pct_map <- tibble(
+  religion = c("Buddhist", "Chinese_folk_religionist", "Christian", "Confucianist",
+               "Daoist", "Ethnic_religionist", "Hindu", "Jain", "Jew", "Muslim",
+               "Shintoist", "Sikh", "Spiritist", "Other", "No_Denomination"),
+  pct_var  = c("buddhist_pct", "chinese_folk_religionist_pct", "christian_pct",
+               "confucianist_pct", "daoist_pct", "ethnic_religionist_pct",
+               "hindu_pct", "jain_pct", "jew_pct", "muslim_pct", "shintoist_pct",
+               "sikh_pct", "spiritist_pct", "other_religion_pct", "no_denomination_pct")
+)
 
-```{r drop-small-minorities}
+wrd_long <- data %>%
+  distinct(country, across(all_of(religion_pct_map$pct_var))) %>%
+  pivot_longer(all_of(religion_pct_map$pct_var),
+               names_to = "pct_var", values_to = "wrd_share") %>%
+  left_join(religion_pct_map, by = "pct_var") %>%
+  select(country, religion, wrd_share)
+
+# Checks: both should return nothing
+wrd_long %>% count(country, religion) %>% filter(n > 1)
+setdiff(unique(data$religion_wrd), religion_pct_map$religion)
+
+country_majority <- data %>%
+  distinct(country, majority_religion) %>%
+  left_join(wrd_long, by = c("country", "majority_religion" = "religion")) %>%
+  rename(majority_share = wrd_share)   # WRD national population %
+```
+
+Country sample checks
+
+```{r country-check}
 country_check <- data %>%
   group_by(country) %>%
   summarise(
-    n_total     = n(),
-    n_majority  = sum(religion_status == "Majority"),
-    n_minority  = sum(religion_status == "Minority"),
+    n_total      = n(),
+    n_majority   = sum(religion_status == "Majority"),
+    n_minority   = sum(religion_status == "Minority"),
     pct_minority = 100 * n_minority / n_total,
     .groups = "drop"
   ) %>%
   arrange(pct_minority)
 
 country_check %>% print(n = Inf)
-
-countries_drop <- country_check %>%
-  filter(pct_minority < 1 | n_minority < 30) %>%
-  pull(country)
-
-countries_drop
-
-data <- data %>% filter(!country %in% countries_drop)
-
-data$country %>% n_distinct()
-data %>% nrow()
+country_check %>% filter(n_minority < 30)   # flagged, not dropped: estimates will be imprecise
 ```
 
 # 2. BUILD DASHBOARD TABLES
@@ -185,38 +166,42 @@ country_lookup <- data %>%
   distinct(country) %>%
   mutate(iso3c = countrycode(country, origin = "country.name", destination = "iso3c"))
 
-# Check nothing failed to match
-country_lookup %>% filter(is.na(iso3c))
+country_lookup %>% filter(is.na(iso3c))   # should be empty
 ```
 
 ## Table 1: Religious composition by country
 
+WVS sample share is survey-weighted; WRD share is the national
+population %. Religious majority/minority status follows the WRD-based
+classification.
+
 ```{r table-composition}
-tbl_composition <- wvs_composition %>%
-  semi_join(country_lookup, by = "country") %>%
-  left_join(country_majority %>% dplyr::select(country, majority_religion), by = "country") %>%
-  mutate(status = if_else(religion_wrd == majority_religion, "Majority", "Minority")) %>%
-  transmute(country, religion = religion_wrd, n, share, status) %>%
+tbl_composition <- data %>%
+  group_by(country) %>%
+  mutate(country_w = sum(survey_weight)) %>%
+  group_by(country, religion_wrd, religion_status) %>%
+  summarise(n = n(), n_w = sum(survey_weight),
+            country_w = first(country_w), .groups = "drop") %>%
+  mutate(share = 100 * n_w / country_w) %>%
+  left_join(wrd_long, by = c("country", "religion_wrd" = "religion")) %>%
+  transmute(country,
+            religion = tidy_religion(religion_wrd),
+            n, share, wrd_share,
+            status = as.character(religion_status)) %>%
   arrange(country, desc(share))
 
 tbl_composition %>% slice_head(n = 10)
-
-tbl_composition <- tbl_composition %>% mutate(religion = tidy_religion(religion))
-tbl_gaps <- tbl_gaps %>% mutate(majority_religion = tidy_religion(majority_religion))
 ```
 
-## Table 2: Outcome means by country and religious minority/majority status (means)
+## Table 2: Outcome means by country and status (descriptive)
+
+Survey-weighted, unadjusted means. These describe each group's level of
+health & wellbeing; the gaps reported in the paper come from Table 3.
 
 ```{r table-means}
-outcome_labels <- c(
-  life_satisfaction = "Life satisfaction (1–10)",
-  happiness         = "Happiness (1–4)",
-  health            = "Self-rated health (1–5)"
-)
-
 tbl_means <- data %>%
-  dplyr::select(country, religion_status, survey_weight,
-                life_satisfaction, happiness, health) %>%
+  select(country, religion_status, survey_weight,
+         life_satisfaction, happiness, health) %>%
   pivot_longer(c(life_satisfaction, happiness, health),
                names_to = "outcome", values_to = "value") %>%
   filter(!is.na(value)) %>%
@@ -236,45 +221,138 @@ tbl_means <- data %>%
 tbl_means %>% slice_head(n = 6)
 ```
 
-## Table 3: Minority–majority gaps
+## Table 3: Minority–majority gaps by country
 
-Negative values indicate that religious minorities score lower than the
-majority in that country.
+`gap` is the **adjusted** gap from the paper's stage-1 country
+regressions (survey-weighted, adjusted for age and sex, HC2 robust SEs);
+these match the forest plots and maps. `gap_raw` is the unadjusted
+difference in weighted means, kept for reference.
+
+Negative values mean religious minorities score lower than the majority.
 
 ```{r table-gaps}
-tbl_gaps <- tbl_means %>%
-  dplyr::select(country, outcome, outcome_label, religion_status, mean, se, n) %>%
-  pivot_wider(
-    names_from  = religion_status,
-    values_from = c(mean, se, n)
-  ) %>%
-  mutate(
-    gap    = mean_Minority - mean_Majority,
-    gap_se = sqrt(se_Minority^2 + se_Majority^2),
-    gap_lower = gap - 1.96 * gap_se,
-    gap_upper = gap + 1.96 * gap_se
-  ) %>%
+# Unadjusted (descriptive) gap
+gaps_raw <- tbl_means %>%
+  select(country, outcome, religion_status, mean, se, n) %>%
+  pivot_wider(names_from = religion_status, values_from = c(mean, se, n)) %>%
+  mutate(gap_raw       = mean_Minority - mean_Majority,
+         gap_raw_se    = sqrt(se_Minority^2 + se_Majority^2),
+         gap_raw_lower = gap_raw - 1.96 * gap_raw_se,
+         gap_raw_upper = gap_raw + 1.96 * gap_raw_se)
+
+# Adjusted gap (stage 1 of the meta-analysis)
+gaps_adj <- model_outputs$country_estimates %>%
+  transmute(country, outcome,
+            gap       = estimate,
+            gap_se    = std.error,
+            gap_lower = estimate - 1.96 * std.error,
+            gap_upper = estimate + 1.96 * std.error)
+
+tbl_gaps <- gaps_adj %>%
+  left_join(gaps_raw, by = c("country", "outcome")) %>%
+  mutate(outcome_label = outcome_labels[outcome]) %>%
   left_join(country_lookup, by = "country") %>%
-  left_join(
-    country_majority %>% dplyr::select(country, majority_religion, majority_share),
-    by = "country"
-  ) %>%
-  left_join(
-    country_check %>% dplyr::select(country, n_total, pct_minority),
-    by = "country"
-  )
+  left_join(country_majority, by = "country") %>%
+  left_join(country_check %>% select(country, n_total, n_minority, pct_minority), by = "country") %>%
+  left_join(model_outputs$country_indicators, by = "country") %>%
+  mutate(majority_religion = tidy_religion(majority_religion))
+
+# Check: one row per country x outcome
+stopifnot(nrow(tbl_gaps) == n_distinct(tbl_gaps$country) * 3)
 
 tbl_gaps %>%
   filter(outcome == "life_satisfaction") %>%
   arrange(gap) %>%
-  dplyr::select(country, majority_religion, gap, gap_lower, gap_upper) %>%
+  select(country, majority_religion, gap, gap_lower, gap_upper, gap_raw) %>%
   print(n = Inf)
 ```
 
-## Table 4: Missingness by status
+## Table 4: Pooled results (meta-analysis)
 
-Important note: minorities are less likely to report happiness outcomes
-which means that the descriptive gaps are likely conservative.
+```{r table-pooled}
+tbl_pooled <- model_outputs$meta_summary %>%
+  left_join(model_outputs$vpc, by = "outcome") %>%
+  mutate(outcome_label = outcome_labels[outcome])
+
+tbl_pooled
+```
+
+## Table 5: Moderation by government restrictions and social hostilities
+
+Simple effects are the minority–majority gap within each GRI/SHI
+category (95% CIs, multiplicity-adjusted across categories). Interaction
+terms are given for every country-level indicator (90% CIs, α = 0.10);
+for GRI/SHI categories, each compares that category's gap with the Low
+category.
+
+```{r table-moderation}
+tbl_simple_effects <- model_outputs$simple_effects %>%
+  mutate(category = as.character(category),
+         outcome_label = outcome_labels[outcome])
+
+model_labels <- c(
+  gri_cat   = "Government restrictions (category)",
+  gri       = "Government restrictions (continuous)",
+  shi_cat   = "Social hostilities (category)",
+  shi       = "Social hostilities (continuous)",
+  democracy = "Democracy index",
+  gdp       = "Log GDP per capita",
+  gini      = "Gini index"
+)
+
+tbl_interactions <- model_outputs$interactions %>%
+  mutate(moderator = factor(model_labels[model], levels = model_labels),
+         term = if_else(grepl("_category", term),
+                        paste(gsub("gri_category|shi_category", "", term), "vs Low"),
+                        "Per 1-unit increase"),
+         outcome_label = outcome_labels[outcome]) %>%
+  arrange(outcome, moderator) %>%
+  select(outcome, outcome_label, model, moderator, term, estimate, se, ci_lb, ci_ub, p)
+
+# Number of countries in each category (for the app's notes)
+tbl_category_n <- model_outputs$country_indicators %>%
+  pivot_longer(c(gri_category, shi_category), names_to = "index", values_to = "category") %>%
+  filter(!is.na(category)) %>%
+  mutate(index = if_else(index == "gri_category", "GRI", "SHI"),
+         category = as.character(category)) %>%
+  count(index, category, name = "n_countries")
+
+tbl_simple_effects
+tbl_interactions
+tbl_category_n
+```
+
+## Table 6: Sex-stratified results
+
+Country gaps for men and women separately (survey-weighted, adjusted for
+age, HC2 robust SEs), the pooled gap for each sex (95% CI), and the
+pooled difference between women and men (90% CI, α = 0.10).
+
+```{r table-sex}
+tbl_sex_country <- model_outputs$sex_country_estimates %>%
+  transmute(country, outcome,
+            sex       = if_else(sex_group == "Female", "Women", "Men"),
+            gap       = estimate,
+            gap_lower = estimate - 1.96 * std.error,
+            gap_upper = estimate + 1.96 * std.error,
+            outcome_label = outcome_labels[outcome])
+
+tbl_sex_pooled <- model_outputs$sex_meta %>%
+  mutate(sex = if_else(sex_group == "Female", "Women", "Men"),
+         outcome_label = outcome_labels[outcome]) %>%
+  select(outcome, outcome_label, sex, estimate, ci_lb, ci_ub, p, I2, k)
+
+tbl_sex_diff <- model_outputs$sex_interaction_meta %>%
+  mutate(outcome_label = outcome_labels[outcome])
+
+tbl_sex_pooled
+tbl_sex_diff
+```
+
+## Table 7: Missingness by status
+
+Among respondents with at least one valid outcome. Minorities were more
+likely to skip outcome items, so gaps may be conservative.
 
 ```{r table-missingness}
 tbl_missing <- data %>%
@@ -294,24 +372,34 @@ tbl_missing
 
 ```{r save-dashboard-data}
 dashboard_data <- list(
-  composition = tbl_composition,
-  means       = tbl_means,
-  gaps        = tbl_gaps,
-  missingness = tbl_missing,
-  lookup      = country_lookup,
+  composition    = tbl_composition,
+  means          = tbl_means,
+  gaps           = tbl_gaps,
+  pooled         = tbl_pooled,
+  simple_effects = tbl_simple_effects,
+  interactions   = tbl_interactions,
+  category_n     = tbl_category_n,
+  sex_country    = tbl_sex_country,
+  sex_pooled     = tbl_sex_pooled,
+  sex_diff       = tbl_sex_diff,
+  missingness    = tbl_missing,
+  lookup         = country_lookup,
   meta = list(
-    n_countries   = n_distinct(data$country),
-    n_respondents = nrow(data),
-    n_majority    = sum(data$religion_status == "Majority"),
-    n_minority    = sum(data$religion_status == "Minority"),
-    built_on      = Sys.Date()
+    n_countries         = n_distinct(data$country),
+    n_respondents       = nrow(data),
+    n_majority          = sum(data$religion_status == "Majority"),
+    n_minority          = sum(data$religion_status == "Minority"),
+    majority_definition = "Religion with >50% of the national population (World Religion Database 2020)",
+    gap_definition      = "Adjusted for age and sex; survey-weighted country regressions with HC2 robust SEs",
+    models_saved_on     = model_outputs$saved_on,
+    built_on            = Sys.Date()
   )
 )
 
 dir.create("data", showWarnings = FALSE)
 saveRDS(dashboard_data, "data/dashboard_data.rds")
 
-# Also export a plain CSV of the country-level gaps for download in the app
+# Plain CSV of country-level gaps for download in the app
 write_csv(dashboard_data$gaps, "data/country_gaps.csv")
 
 dashboard_data$meta
